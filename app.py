@@ -6107,7 +6107,7 @@ def render_tour_management():
                 st.markdown("##### 5. Chi phí phát sinh (Nước, Sim, Banner...)")
                 df_incurred = st.session_state.ls_incurred_temp.copy()
                 
-                # Clean numbers for display
+                # Clean numbers và tính toán
                 df_incurred['price'] = df_incurred['price'].apply(clean_vnd_val)
                 df_incurred['quantity'] = df_incurred['quantity'].apply(clean_vnd_val)
                 df_incurred['deposit'] = df_incurred['deposit'].apply(clean_vnd_val)
@@ -6121,14 +6121,14 @@ def render_tour_management():
                     column_config={
                         "name": st.column_config.TextColumn("Tên chi phí", required=True),
                         "unit": st.column_config.TextColumn("ĐVT"),
-                        "quantity": st.column_config.NumberColumn("Số lượng", min_value=0),
+                        "quantity": st.column_config.NumberColumn("Số lượng", min_value=0, format="%.0f"),
                         "price": st.column_config.NumberColumn("Đơn giá", format="%d VND"),
                         "total_amount": st.column_config.NumberColumn("Thành tiền", format="%d VND", disabled=True),
                         "deposit": st.column_config.NumberColumn("Đã ứng/cọc", format="%d VND"),
                         "remaining": st.column_config.NumberColumn("Còn lại", format="%d VND", disabled=True),
                         "note": st.column_config.TextColumn("Ghi chú")
                     },
-                    column_order=("name", "unit", "quantity", "price", "total_amount", "deposit", "remaining", "note"),
+                    column_order=["name", "unit", "quantity", "price", "total_amount", "deposit", "remaining", "note"],
                     use_container_width=True
                 )
                 
@@ -6140,9 +6140,9 @@ def render_tour_management():
                 edited_incurred['remaining'] = edited_incurred['total_amount'] - edited_incurred['deposit']
                 
                 cols_inc = ['name', 'unit', 'quantity', 'price', 'total_amount', 'deposit', 'note']
-                # So sánh (bỏ qua cột tính toán remaining để tránh loop nếu float lệch nhẹ)
+                # So sánh với dữ liệu cũ
                 if not edited_incurred[cols_inc].equals(st.session_state.ls_incurred_temp[cols_inc].map(lambda x: x if not isinstance(x, float) else x)):
-                     st.session_state.ls_incurred_temp = edited_incurred
+                     st.session_state.ls_incurred_temp = edited_incurred[cols_inc]
                      st.rerun()
                 st.write("")
                 # 6. CHECKLIST BÀN GIAO (Đã đổi thứ tự xuống dưới)
@@ -6229,7 +6229,7 @@ def render_tour_management():
                         # Lưu Chi phí phát sinh
                         run_query("DELETE FROM tour_incurred_costs WHERE tour_id=?", (tour_id_ls,), commit=True)
                         if not edited_incurred.empty:
-                            data_inc = [(tour_id_ls, r['name'], r['unit'], r['quantity'], r['price'], r['quantity']*r['price'], r['deposit'], r['note']) for _, r in edited_incurred.iterrows() if r['name']]
+                            data_inc = [(tour_id_ls, r['name'], r['unit'], r['quantity'], r['price'], r['total_amount'], r['deposit'], r['note']) for _, r in edited_incurred.iterrows() if r['name']]
                             if data_inc: run_query_many("INSERT INTO tour_incurred_costs (tour_id, name, unit, quantity, price, total_amount, deposit, note) VALUES (?,?,?,?,?,?,?,?)", data_inc)
 
                         # Lưu Checklist
@@ -7426,405 +7426,427 @@ def render_tour_management():
         st.markdown("""<div style="background-color: #e3f2fd; padding: 15px; border-radius: 10px; margin-bottom: 20px; border-left: 5px solid #2196F3;">
             <b>💡 Công cụ này giúp bạn:</b><br>
             • Tính ngược từ tổng tiền (đã bao gồm VAT và phí phục vụ) về giá gốc<br>
-            • Xác định chính xác giá chưa VAT, tiền phí phục vụ và tiền VAT<br>
-            • Hữu ích khi báo giá cho khách hoặc đối chiếu hóa đơn
+            • Hỗ trợ nhiều dòng phát sinh (mỗi dòng có % phí phục vụ riêng)<br>
+            • Xuất Excel theo form bảng hóa đơn để gửi đối chiếu
         </div>""", unsafe_allow_html=True)
-        
-        # Session state để lưu giá trị
+
         if "inv_total" not in st.session_state: st.session_state.inv_total = "0"
-        if "inv_extra_cost" not in st.session_state: st.session_state.inv_extra_cost = "0"
         if "inv_main_qty" not in st.session_state: st.session_state.inv_main_qty = 1
         if "inv_service_pct_main" not in st.session_state: st.session_state.inv_service_pct_main = 5.0
-        if "inv_service_pct_extra" not in st.session_state: st.session_state.inv_service_pct_extra = 5.0
         if "inv_vat_pct" not in st.session_state: st.session_state.inv_vat_pct = 8.0
-        
-        col_input1, col_input2 = st.columns(2)
-        
+        if "inv_extra_rows" not in st.session_state:
+            # Khởi tạo DataFrame rỗng cho danh sách phát sinh với cột Phí phục vụ %
+            st.session_state.inv_extra_rows = pd.DataFrame(columns=["description", "unit", "quantity", "unit_price", "service_pct", "vat_pct"])
+
         def fmt_inv_total():
             val = st.session_state.inv_total
             try:
                 v_float = float(val.replace('.', '').replace(',', '').replace(' VND', '').strip())
                 st.session_state.inv_total = "{:,.0f}".format(v_float).replace(",", ".") + " VND"
-            except: pass
-        
-        def fmt_inv_extra():
-            val = st.session_state.inv_extra_cost
-            try:
-                v_float = float(val.replace('.', '').replace(',', '').replace(' VND', '').strip())
-                st.session_state.inv_extra_cost = "{:,.0f}".format(v_float).replace(",", ".") + " VND"
-            except: pass
-        
-        with col_input1:
+            except:
+                pass
+
+        col_t1, col_t2 = st.columns([2, 1])
+        with col_t1:
             st.text_input(
-                "💰 Tổng tiền thanh toán (Bao gồm VAT + Phí phục vụ)",
+                "💰 Tổng tiền thanh toán (đã gồm VAT + phí)",
                 key="inv_total",
                 on_change=fmt_inv_total,
-                help="Nhập tổng tiền mà khách phải trả (VD: 8.994.000)"
+                help="Nhập tổng tiền cuối cùng trên hóa đơn (VD: 8.994.000)"
             )
-        
-        with col_input2:
-            st.text_input(
-                "🔧 Chi phí phát sinh (Nếu có)",
-                key="inv_extra_cost",
-                on_change=fmt_inv_extra,
-                help="Nhập chi phí phát sinh (VD: 396.825). Để 0 nếu không có"
-            )
-
-        col_qty1, col_qty2 = st.columns([1, 1])
-        with col_qty1:
+        with col_t2:
             main_qty = st.number_input(
-                "🛏️ Số lượng dịch vụ chính (đêm/lần)",
+                "🛏️ Số lượng DV chính",
                 min_value=1,
                 value=st.session_state.inv_main_qty,
                 step=1,
                 key="inv_main_qty",
-                help="Ví dụ khách sạn ở 3 đêm thì nhập 3 để tự chia đơn giá"
+                help="Ví dụ khách sạn 3 đêm thì nhập 3"
             )
-        with col_qty2:
-            st.caption("Đơn giá dịch vụ chính sẽ được tính = Tổng dịch vụ chính / Số lượng")
-        
-        col_pct1, col_pct2, col_pct3 = st.columns(3)
-        with col_pct1:
+
+        c_pct1, c_pct2 = st.columns(2)
+        with c_pct1:
             service_pct_main = st.number_input(
                 "🛎️ Phí phục vụ - Dịch vụ chính (%)",
                 min_value=0.0,
                 max_value=100.0,
                 value=st.session_state.inv_service_pct_main,
                 step=0.5,
-                key="inv_service_pct_main",
-                help="% phí phục vụ cho dịch vụ chính (Để 0 nếu không có)"
+                key="inv_service_pct_main"
             )
-        
-        with col_pct2:
-            service_pct_extra = st.number_input(
-                "🔧 Phí phục vụ - Phát sinh (%)",
-                min_value=0.0,
-                max_value=100.0,
-                value=st.session_state.inv_service_pct_extra,
-                step=0.5,
-                key="inv_service_pct_extra",
-                help="% phí phục vụ cho chi phí phát sinh (Để 0 nếu không có)"
-            )
-        
-        with col_pct3:
+        with c_pct2:
             vat_pct = st.number_input(
                 "📋 VAT (%)",
                 min_value=0.0,
                 max_value=100.0,
                 value=st.session_state.inv_vat_pct,
                 step=0.5,
-                key="inv_vat_pct",
-                help="Tỷ lệ % VAT tính trên tổng (thường 8-10%)"
+                key="inv_vat_pct"
             )
+
+        # --- BẢNG NHẬP CHI PHÍ PHÁT SINH ---
+        st.write("")
+        st.markdown("#### 📋 Danh sách Chi phí Phát sinh")
+        st.caption("💡 Nhập các chi phí phát sinh kèm theo (nếu có). Mỗi dòng có thể có % Phí phục vụ riêng. Hệ thống sẽ tách VAT riêng cho nhóm này.")
         
+        df_incurred = st.session_state.inv_extra_rows.copy()
+        if df_incurred.empty:
+            df_incurred = pd.DataFrame({
+                "description": [""],
+                "unit": [""],
+                "quantity": [0.0],
+                "unit_price": [0.0],
+                "service_pct": [5.0],
+                "vat_pct": [float(vat_pct)]
+            })
+        
+        # Đảm bảo cột service_pct tồn tại
+        if "service_pct" not in df_incurred.columns:
+            df_incurred["service_pct"] = 5.0
+        # Đảm bảo cột vat_pct tồn tại
+        if "vat_pct" not in df_incurred.columns:
+            df_incurred["vat_pct"] = float(vat_pct)
+        
+        # Format cột unit_price để hiển thị đẹp (100.000 VND)
+        df_incurred_display = df_incurred.copy()
+        df_incurred_display['unit_price'] = df_incurred_display['unit_price'].apply(
+            lambda x: format_vnd(float(x) if x else 0) + " VND"
+        )
+        
+        edited_incurred = st.data_editor(
+            df_incurred_display,
+            num_rows="dynamic",
+            column_config={
+                "description": st.column_config.TextColumn("Diễn giải", required=True, width="large"),
+                "unit": st.column_config.TextColumn("Đơn vị", width="small"),
+                "quantity": st.column_config.NumberColumn("Số lượng", min_value=0, format="%.0f"),
+                "unit_price": st.column_config.TextColumn("Đơn giá", help="Nhập số tiền (VD: 100000 hoặc 100.000)"),
+                "service_pct": st.column_config.NumberColumn("Phí DV (%)", min_value=0, max_value=100, format="%.1f %%", help="Phí phục vụ cho dòng này"),
+                "vat_pct": st.column_config.NumberColumn("VAT (%)", min_value=0, max_value=100, format="%.1f %%", help="Ví dụ: rượu/nước ngọt có đường nhập 10"),
+            },
+            use_container_width=True,
+            hide_index=True,
+            key="inv_incurred_editor"
+        )
+        
+        # Clean dữ liệu: Chuyển unit_price từ text về số
+        edited_incurred_clean = edited_incurred.copy()
+        edited_incurred_clean['unit_price'] = edited_incurred_clean['unit_price'].apply(
+            lambda x: float(str(x).replace('.', '').replace(',', '').replace(' VND', '').strip()) if x else 0.0
+        )
+        if 'vat_pct' not in edited_incurred_clean.columns:
+            edited_incurred_clean['vat_pct'] = float(vat_pct)
+        edited_incurred_clean['vat_pct'] = pd.to_numeric(edited_incurred_clean['vat_pct'], errors='coerce').fillna(float(vat_pct))
+        
+        # Cập nhật vào session state (lưu dạng số)
+        st.session_state.inv_extra_rows = edited_incurred_clean.copy()
+
         st.write("")
         if st.button("🧮 Tính toán", type="primary", use_container_width=True):
             try:
-                # Parse tổng tiền
                 total_str = st.session_state.inv_total.replace('.', '').replace(',', '').replace(' VND', '').strip()
                 total_amount = float(total_str) if total_str else 0.0
-                
-                # Parse chi phí phát sinh
-                extra_str = st.session_state.inv_extra_cost.replace('.', '').replace(',', '').replace(' VND', '').strip()
-                extra_cost = float(extra_str) if extra_str else 0.0
-                
+
                 if total_amount <= 0:
                     st.error("⚠️ Vui lòng nhập tổng tiền hợp lệ!")
                 else:
-                    # Công thức tính ngược với 2 loại phí phục vụ khác nhau:
-                    # Total = [Base × (1 + service_main%)] + [Extra × (1 + service_extra%)] × (1 + VAT%)
-                    # 
-                    # Bước 1: Tổng trước VAT = Total ÷ (1 + VAT%)
-                    # Bước 2: 
-                    #   - Nếu có phát sinh: 
-                    #     Extra_with_service = Extra × (1 + service_extra%)
-                    #     Base_with_service = Tổng trước VAT - Extra_with_service
-                    #     Base = Base_with_service ÷ (1 + service_main%)
-                    #   - Nếu không có phát sinh:
-                    #     Base = Tổng trước VAT ÷ (1 + service_main%)
+                    main_service_rate = 1 + (service_pct_main / 100)
+
+                    # --- BƯỚC 1: Tính tổng chi phí phát sinh (chưa gồm phí DV và VAT) ---
+                    df_extra = edited_incurred_clean.copy()
+                    df_extra = df_extra[df_extra['description'].str.strip().astype(bool)] # Lọc dòng rỗng
+                    df_extra['quantity'] = pd.to_numeric(df_extra['quantity'], errors='coerce').fillna(0)
+                    df_extra['unit_price'] = pd.to_numeric(df_extra['unit_price'], errors='coerce').fillna(0)
+                    df_extra['service_pct'] = pd.to_numeric(df_extra['service_pct'], errors='coerce').fillna(5.0)
+                    df_extra['vat_pct'] = pd.to_numeric(df_extra['vat_pct'], errors='coerce').fillna(float(vat_pct))
+                    df_extra['subtotal'] = df_extra['quantity'] * df_extra['unit_price']
                     
-                    service_rate_main = 1 + (service_pct_main / 100)
-                    service_rate_extra = 1 + (service_pct_extra / 100)
-                    vat_rate = 1 + (vat_pct / 100)
+                    # Tính phí dịch vụ cho từng dòng
+                    df_extra['service_fee'] = df_extra['subtotal'] * (df_extra['service_pct'] / 100.0)
+                    df_extra['subtotal_with_service'] = df_extra['subtotal'] + df_extra['service_fee']
+                    # Với VAT hỗn hợp, cần quy đổi từng dòng theo VAT riêng
+                    df_extra['total_with_vat'] = df_extra['subtotal_with_service'] * (1 + df_extra['vat_pct'] / 100.0)
                     
-                    # Bước 1: Tính tổng trước VAT
-                    subtotal_before_vat = total_amount / vat_rate
-                    vat_amount = total_amount - subtotal_before_vat
+                    total_incurred_base = df_extra['subtotal'].sum()
+                    total_incurred_service_fee = df_extra['service_fee'].sum()
+                    total_incurred_with_service = df_extra['subtotal_with_service'].sum()
+                    total_incurred_with_vat = df_extra['total_with_vat'].sum()
                     
-                    # Bước 2: Tính giá gốc và chi phí phát sinh
-                    if extra_cost > 0:
-                        # Có chi phí phát sinh
-                        extra_with_service = extra_cost * service_rate_extra
-                        extra_service_fee = extra_cost * (service_pct_extra / 100)
-                        
-                        base_with_service = subtotal_before_vat - extra_with_service
-                        base_price = base_with_service / service_rate_main
-                        base_service_fee = base_price * (service_pct_main / 100)
-                        
-                        total_service_fee = base_service_fee + extra_service_fee
-                    else:
-                        # Không có chi phí phát sinh
-                        base_price = subtotal_before_vat / service_rate_main
-                        base_service_fee = base_price * (service_pct_main / 100)
-                        
-                        extra_service_fee = 0
-                        total_service_fee = base_service_fee
+                    # --- BƯỚC 2: Tính ngược từ tổng tiền về 2 nhóm ---
+                    # Do phát sinh có thể có nhiều mức VAT, tính trực tiếp trên tổng sau VAT
+                    main_vat_rate = 1 + (vat_pct / 100.0)
+                    total_main_with_service = (total_amount - total_incurred_with_vat) / main_vat_rate
+                    if total_main_with_service < 0:
+                        st.error("⚠️ Tổng phát sinh (gồm VAT) đang lớn hơn tổng thanh toán. Vui lòng kiểm tra lại dữ liệu.")
+                        st.stop()
+
+                    base_price_main = total_main_with_service / main_service_rate
+                    main_service_fee = base_price_main * (service_pct_main / 100.0)
+                    main_unit_price = base_price_main / float(main_qty) if float(main_qty) > 0 else base_price_main
+
+                    # --- BƯỚC 3: Xây dựng bảng hóa đơn ---
+                    invoice_rows = []
                     
-                    # Tính lại để xác nhận
-                    check_subtotal = base_price + base_service_fee + extra_cost + extra_service_fee
-                    check_total = check_subtotal + vat_amount
-                    main_unit_price = base_price / float(main_qty) if float(main_qty) > 0 else base_price
+                    # NHÓM 1: Dịch vụ chính
+                    invoice_rows.append({
+                        "name": "Dịch vụ chính",
+                        "unit": "Đêm",
+                        "qty": float(main_qty),
+                        "unit_price": main_unit_price,
+                        "amount": base_price_main,
+                        "vat_pct": float(vat_pct),
+                        "group": "main"
+                    })
+                    if main_service_fee > 0:
+                        invoice_rows.append({
+                            "name": f"Phí dịch vụ {service_pct_main:g}%",
+                            "unit": "Lần",
+                            "qty": 1.0,
+                            "unit_price": main_service_fee,
+                            "amount": main_service_fee,
+                            "vat_pct": float(vat_pct),
+                            "group": "main"
+                        })
                     
-                    # Hiển thị kết quả
-                    st.write("")
+                    # NHÓM 2: Chi phí phát sinh (hiển thị từng dòng + phí DV riêng)
+                    for idx, row in df_extra.iterrows():
+                        if row['subtotal'] > 0:
+                            invoice_rows.append({
+                                "name": row['description'],
+                                "unit": row['unit'],
+                                "qty": float(row['quantity']),
+                                "unit_price": float(row['unit_price']),
+                                "amount": float(row['subtotal']),
+                                "vat_pct": float(row['vat_pct']),
+                                "group": "incurred"
+                            })
+                            # Thêm dòng phí DV cho mỗi chi phí phát sinh (nếu có)
+                            if row['service_fee'] > 0:
+                                invoice_rows.append({
+                                    "name": f"  ↳ Phí DV {row['service_pct']:g}%",
+                                    "unit": "Lần",
+                                    "qty": 1.0,
+                                    "unit_price": float(row['service_fee']),
+                                    "amount": float(row['service_fee']),
+                                    "vat_pct": float(row['vat_pct']),
+                                    "group": "incurred"
+                                })
+
+                    # --- BƯỚC 4: Tính VAT riêng cho từng nhóm ---
+                    df_inv = pd.DataFrame(invoice_rows)
+                    
+                    def calc_vat_by_group(df, group_name):
+                        """Tính VAT cho một nhóm (theo VAT từng dòng)."""
+                        group_df = df[df['group'] == group_name].copy()
+                        group_subtotal = group_df['amount'].sum()
+                        group_df['vat_amount'] = group_df['amount'] * (group_df['vat_pct'] / 100.0)
+                        group_vat = group_df['vat_amount'].sum()
+                        group_df['total_amount'] = group_df['amount'] + group_df['vat_amount']
+                        return group_df, group_subtotal, group_vat
+                    
+                    df_main, subtotal_main, vat_main = calc_vat_by_group(df_inv, "main")
+                    df_incurred_final, subtotal_incurred, vat_incurred = calc_vat_by_group(df_inv, "incurred")
+                    
+                    # Gộp lại
+                    df_result = pd.concat([df_main, df_incurred_final], ignore_index=True)
+                    
+                    # Tổng cộng
+                    sub_total_check = df_result["amount"].sum()
+                    vat_total_check = df_result["vat_amount"].sum()
+                    grand_total_check = df_result["total_amount"].sum()
+
+                    st.session_state.inv_last_result = {
+                        "df": df_result.copy(),
+                        "sub_total": sub_total_check,
+                        "vat_total": vat_total_check,
+                        "grand_total": grand_total_check,
+                        "vat_pct": vat_pct,
+                        # Thêm thông tin phân nhóm
+                        "subtotal_main": subtotal_main,
+                        "vat_main": vat_main,
+                        "subtotal_incurred": subtotal_incurred,
+                        "vat_incurred": vat_incurred,
+                    }
+
                     st.markdown("### 📊 Kết Quả Tính Toán")
                     
-                    # Bảng kết quả chi tiết
-                    if extra_cost > 0:
-                        # Có chi phí phát sinh - hiển thị đầy đủ
-                        st.markdown(f"""
-                        <div style="background-color: #ffffff; padding: 20px; border-radius: 10px; border: 2px solid #e0e0e0;">
-                            <table style="width: 100%; border-collapse: collapse; font-size: 1.05em;">
-                                <thead>
-                                    <tr style="background-color: #1976D2; color: white;">
-                                        <th style="padding: 12px; text-align: left; border-bottom: 2px solid #ddd;">STT</th>
-                                        <th style="padding: 12px; text-align: left; border-bottom: 2px solid #ddd;">Tên hàng hóa, dịch vụ</th>
-                                        <th style="padding: 12px; text-align: center; border-bottom: 2px solid #ddd;">Đơn vị tính</th>
-                                        <th style="padding: 12px; text-align: center; border-bottom: 2px solid #ddd;">Số lượng</th>
-                                        <th style="padding: 12px; text-align: right; border-bottom: 2px solid #ddd;">Đơn giá</th>
-                                        <th style="padding: 12px; text-align: right; border-bottom: 2px solid #ddd;">Thành tiền</th>
-                                        <th style="padding: 12px; text-align: center; border-bottom: 2px solid #ddd;">% VAT</th>
-                                        <th style="padding: 12px; text-align: right; border-bottom: 2px solid #ddd;">Tiền thuế</th>
-                                        <th style="padding: 12px; text-align: right; border-bottom: 2px solid #ddd;">Tổng cộng</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr>
-                                        <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: center;">(1)</td>
-                                        <td style="padding: 10px; border-bottom: 1px solid #eee;">(2)</td>
-                                        <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: center;">(3)</td>
-                                        <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: center;">(4)</td>
-                                        <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">(5)</td>
-                                        <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">(6)=(4)×(5)</td>
-                                        <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: center;">(7)</td>
-                                        <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">(8)</td>
-                                        <td style="padding: 10px; border-bottom: 1px solid #eee; text-align: right;">(9)=(6)+(8)</td>
-                                    </tr>
-                                    <tr style="background-color: #E3F2FD;">
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: center; font-weight: bold;">1</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd;"><b>Dịch vụ chính</b></td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: center;">Đêm</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: center;">{main_qty}</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: right;">{format_vnd(main_unit_price)}</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: right; color: #2196F3; font-weight: bold;">{format_vnd(base_price)}</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: center;">{vat_pct}%</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: right; color: #4CAF50;">{format_vnd(base_price * vat_pct / 100)}</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: right; font-weight: bold;">{format_vnd(base_price * vat_rate)}</td>
-                                    </tr>
-                                    <tr>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: center; font-weight: bold;">2</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd;"><b>Phí dịch vụ {service_pct_main}%</b></td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: center;">Lần</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: center;">1</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: right;">{format_vnd(base_service_fee)}</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: right; color: #FF9800; font-weight: bold;">{format_vnd(base_service_fee)}</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: center;">{vat_pct}%</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: right; color: #4CAF50;">{format_vnd(base_service_fee * vat_pct / 100)}</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: right; font-weight: bold;">{format_vnd(base_service_fee * vat_rate)}</td>
-                                    </tr>
-                                    <tr style="background-color: #FFF3E0;">
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: center; font-weight: bold;">3</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd;"><b>Phát sinh tại khách sạn</b></td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: center;">Lần</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: center;">1</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: right;">{format_vnd(extra_cost)}</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: right; color: #F57C00; font-weight: bold;">{format_vnd(extra_cost)}</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: center;">{vat_pct}%</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: right; color: #4CAF50;">{format_vnd(extra_cost * vat_pct / 100)}</td>
-                                        <td style="padding: 12px; border-bottom: 1px solid #ddd; text-align: right; font-weight: bold;">{format_vnd(extra_cost * vat_rate)}</td>
-                                    </tr>
-                                    <tr>
-                                        <td style="padding: 12px; border-bottom: 2px solid #ddd; text-align: center; font-weight: bold;">4</td>
-                                        <td style="padding: 12px; border-bottom: 2px solid #ddd;"><b>Phí dịch vụ phát sinh {service_pct_extra}%</b></td>
-                                        <td style="padding: 12px; border-bottom: 2px solid #ddd; text-align: center;">Lần</td>
-                                        <td style="padding: 12px; border-bottom: 2px solid #ddd; text-align: center;">1</td>
-                                        <td style="padding: 12px; border-bottom: 2px solid #ddd; text-align: right;">{format_vnd(extra_service_fee)}</td>
-                                        <td style="padding: 12px; border-bottom: 2px solid #ddd; text-align: right; color: #FF6F00; font-weight: bold;">{format_vnd(extra_service_fee)}</td>
-                                        <td style="padding: 12px; border-bottom: 2px solid #ddd; text-align: center;">{vat_pct}%</td>
-                                        <td style="padding: 12px; border-bottom: 2px solid #ddd; text-align: right; color: #4CAF50;">{format_vnd(extra_service_fee * vat_pct / 100)}</td>
-                                        <td style="padding: 12px; border-bottom: 2px solid #ddd; text-align: right; font-weight: bold;">{format_vnd(extra_service_fee * vat_rate)}</td>
-                                    </tr>
-                                    <tr style="background-color: #F5F5F5; font-weight: bold;">
-                                        <td colspan="5" style="padding: 15px; border-bottom: 2px solid #bbb; text-align: right;">Tổng cộng (Total amount):</td>
-                                        <td style="padding: 15px; border-bottom: 2px solid #bbb; text-align: right; font-size: 1.15em; color: #1565C0;">{format_vnd(check_subtotal)}</td>
-                                        <td style="padding: 15px; border-bottom: 2px solid #bbb;"></td>
-                                        <td style="padding: 15px; border-bottom: 2px solid #bbb; text-align: right; font-size: 1.15em; color: #2E7D32;">{format_vnd(vat_amount)}</td>
-                                        <td style="padding: 15px; border-bottom: 2px solid #bbb; text-align: right; font-size: 1.2em; color: #1B5E20; background-color: #C8E6C9;">{format_vnd(check_total)}</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    else:
-                        # Không có chi phí phát sinh - hiển thị đơn giản
-                        st.markdown(f"""
-                        <div style="background-color: #ffffff; padding: 20px; border-radius: 10px; border: 2px solid #e0e0e0;">
-                            <table style="width: 100%; border-collapse: collapse; font-size: 1.1em;">
-                                <tr style="background-color: #f5f5f5;">
-                                    <td style="padding: 12px; border-bottom: 2px solid #ddd;"><b>Hạng mục</b></td>
-                                    <td style="padding: 12px; text-align: right; border-bottom: 2px solid #ddd;"><b>Số tiền</b></td>
-                                </tr>
-                                <tr>
-                                    <td style="padding: 12px; border-bottom: 1px solid #eee;">💵 <b>Giá gốc (chưa VAT, chưa phí)</b></td>
-                                    <td style="padding: 12px; text-align: right; border-bottom: 1px solid #eee; font-size: 1.15em; color: #2196F3;"><b>{format_vnd(base_price)} VND</b></td>
-                                </tr>
-                                <tr style="background-color: #fafafa;">
-                                    <td style="padding: 12px; border-bottom: 1px solid #eee;">🛎️ Phí phục vụ ({service_pct_main}%)</td>
-                                    <td style="padding: 12px; text-align: right; border-bottom: 1px solid #eee; color: #FF9800;">+ {format_vnd(base_service_fee)} VND</td>
-                                </tr>
-                                <tr>
-                                    <td style="padding: 12px; border-bottom: 1px solid #eee;">📝 <i>Giá sau phí phục vụ</i></td>
-                                    <td style="padding: 12px; text-align: right; border-bottom: 1px solid #eee; font-style: italic;">{format_vnd(check_subtotal)} VND</td>
-                                </tr>
-                                <tr style="background-color: #fafafa;">
-                                    <td style="padding: 12px; border-bottom: 2px solid #ddd;">📋 VAT ({vat_pct}%)</td>
-                                    <td style="padding: 12px; text-align: right; border-bottom: 2px solid #ddd; color: #4CAF50;">+ {format_vnd(vat_amount)} VND</td>
-                                </tr>
-                                <tr style="background-color: #e8f5e9;">
-                                    <td style="padding: 15px; font-size: 1.2em;"><b>💰 TỔNG CỘNG</b></td>
-                                    <td style="padding: 15px; text-align: right; font-size: 1.3em; color: #1B5E20;"><b>{format_vnd(check_total)} VND</b></td>
-                                </tr>
-                            </table>
-                        </div>
-                        """, unsafe_allow_html=True)
+                    # --- HIỂN THỊ THEO NHÓM ---
+                    st.markdown("#### 🏨 Nhóm 1: Dịch vụ Chính")
+                    view_df_main = df_main.copy().reset_index(drop=True)
+                    view_df_main.index = view_df_main.index + 1
+                    view_df_main["Số lượng"] = view_df_main["qty"]
+                    view_df_main["Đơn giá"] = view_df_main["unit_price"].apply(lambda x: format_vnd(x))
+                    view_df_main["Thành tiền"] = view_df_main["amount"].apply(lambda x: format_vnd(x))
+                    view_df_main["% VAT"] = view_df_main["vat_pct"].apply(lambda x: f"{x:g}%")
+                    view_df_main["Tiền thuế"] = view_df_main["vat_amount"].apply(lambda x: format_vnd(x))
+                    view_df_main["Tổng cộng"] = view_df_main["total_amount"].apply(lambda x: format_vnd(x))
+                    st.dataframe(
+                        view_df_main[["name", "unit", "Số lượng", "Đơn giá", "Thành tiền", "% VAT", "Tiền thuế", "Tổng cộng"]],
+                        column_config={
+                            "name": "Tên hàng hóa, dịch vụ",
+                            "unit": "Đơn vị tính",
+                        },
+                        use_container_width=True
+                    )
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Tổng trước VAT", format_vnd(subtotal_main) + " VND")
+                    c2.metric("VAT", format_vnd(vat_main) + " VND")
+                    c3.metric("Tổng sau VAT", format_vnd(subtotal_main + vat_main) + " VND")
                     
-                    # Thông tin bổ sung
+                    # Hiển thị nhóm phát sinh nếu có
+                    if not df_incurred_final.empty:
+                        st.write("")
+                        st.markdown("#### 💰 Nhóm 2: Chi Phí Phát Sinh")
+                        view_df_incurred = df_incurred_final.copy().reset_index(drop=True)
+                        view_df_incurred.index = view_df_incurred.index + 1
+                        view_df_incurred["Số lượng"] = view_df_incurred["qty"]
+                        view_df_incurred["Đơn giá"] = view_df_incurred["unit_price"].apply(lambda x: format_vnd(x))
+                        view_df_incurred["Thành tiền"] = view_df_incurred["amount"].apply(lambda x: format_vnd(x))
+                        view_df_incurred["% VAT"] = view_df_incurred["vat_pct"].apply(lambda x: f"{x:g}%")
+                        view_df_incurred["Tiền thuế"] = view_df_incurred["vat_amount"].apply(lambda x: format_vnd(x))
+                        view_df_incurred["Tổng cộng"] = view_df_incurred["total_amount"].apply(lambda x: format_vnd(x))
+                        st.dataframe(
+                            view_df_incurred[["name", "unit", "Số lượng", "Đơn giá", "Thành tiền", "% VAT", "Tiền thuế", "Tổng cộng"]],
+                            column_config={
+                                "name": "Tên hàng hóa, dịch vụ",
+                                "unit": "Đơn vị tính",
+                            },
+                            use_container_width=True
+                        )
+                        c1, c2, c3 = st.columns(3)
+                        c1.metric("Tổng trước VAT", format_vnd(subtotal_incurred) + " VND")
+                        c2.metric("VAT", format_vnd(vat_incurred) + " VND")
+                        c3.metric("Tổng sau VAT", format_vnd(subtotal_incurred + vat_incurred) + " VND")
+                    
+                    # Tổng kết
                     st.write("")
-                    if extra_cost > 0:
-                        col_info1, col_info2, col_info3, col_info4 = st.columns(4)
-                        with col_info1:
-                            st.metric("Giá Dịch Vụ Chính", format_vnd(base_price) + " VND")
-                        with col_info2:
-                            st.metric("Chi Phí Phát Sinh", format_vnd(extra_cost) + " VND")
-                        with col_info3:
-                            st.metric("Tổng Phí Dịch Vụ", format_vnd(total_service_fee) + " VND",
-                                     delta=f"Chính: {service_pct_main}%, Phát sinh: {service_pct_extra}%")
-                        with col_info4:
-                            st.metric("Tổng VAT", format_vnd(vat_amount) + " VND",
-                                     delta=f"{vat_pct}%")
-                    else:
-                        col_info1, col_info2, col_info3, col_info4 = st.columns(4)
-                        with col_info1:
-                            st.metric("Giá Gốc", format_vnd(base_price) + " VND", 
-                                     delta=f"-{(base_service_fee + vat_amount):,.0f} VND".replace(",", "."),
-                                     delta_color="inverse")
-                        with col_info2:
-                            total_fee = base_service_fee + vat_amount
-                            fee_percent = (total_fee / total_amount * 100) if total_amount > 0 else 0
-                            st.metric("Tổng Phí + VAT", format_vnd(total_fee) + " VND",
-                                     delta=f"{fee_percent:.1f}%")
-                        with col_info3:
-                            st.metric("Đơn giá DV chính", format_vnd(main_unit_price) + " VND")
-                        with col_info4:
-                            st.metric("Tổng Xác Nhận", format_vnd(check_total) + " VND")
-                    
-                    # Gợi ý sử dụng
-                    if extra_cost > 0:
-                        info_text = """💡 **Cách hiểu hóa đơn:**  
-• **Dịch vụ chính** = Giá gốc của dịch vụ (lưu trú, tour, ...)  
-• **Phí dịch vụ chính** = Phí phục vụ tính trên giá dịch vụ chính ({service_pct_main}%)  
-• **Phát sinh** = Chi phí bổ sung (minibar, giặt là, ...)  
-• **Phí phát sinh** = Phí phục vụ tính trên chi phí phát sinh ({service_pct_extra}%)  
-• **VAT** = Thuế tính trên tổng (dịch vụ + phí + phát sinh + phí phát sinh)"""
-                        st.info(info_text.format(service_pct_main=service_pct_main, service_pct_extra=service_pct_extra))
-                    else:
-                        st.info("""💡 **Cách dùng kết quả:**  
-• **Giá gốc** là số tiền cần báo nếu chưa tính phí và thuế  
-• **Giá sau phí phục vụ** dùng làm cơ sở tính VAT  
-• Kiểm tra **Tổng Xác Nhận** = Tổng tiền bạn nhập ban đầu""")
-                    
+                    st.markdown("---")
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("💵 TỔNG TRƯỚC VAT", format_vnd(sub_total_check) + " VND")
+                    m2.metric("📋 TỔNG VAT", format_vnd(vat_total_check) + " VND")
+                    m3.metric("💰 TỔNG THANH TOÁN", format_vnd(grand_total_check) + " VND")
+
+                    st.info("💡 Không áp dụng làm tròn hóa đơn: hệ thống giữ nguyên kết quả tính theo công thức hiện tại.")
+
             except Exception as e:
                 st.error(f"❌ Lỗi tính toán: {str(e)}")
-        
-        # Phần giải thích công thức
+                import traceback
+                st.code(traceback.format_exc())
+
+        if "inv_last_result" in st.session_state:
+            st.write("")
+            if st.button("📥 Xuất Excel hóa đơn", use_container_width=True):
+                try:
+                    rs = st.session_state.inv_last_result
+                    df_exp = rs["df"].copy()
+                    buffer_inv = io.BytesIO()
+
+                    with pd.ExcelWriter(buffer_inv, engine='xlsxwriter') as writer:
+                        df_x = df_exp.copy()
+                        df_x.insert(0, "STT", range(1, len(df_x) + 1))
+                        df_x = df_x[["STT", "name", "unit", "qty", "unit_price", "amount", "vat_pct", "vat_amount", "total_amount"]]
+                        df_x.columns = ["STT", "Tên hàng hóa, dịch vụ", "Đơn vị tính", "Số lượng", "Đơn giá", "Thành tiền", "% VAT", "Tiền thuế", "Tổng cộng"]
+                        df_x.to_excel(writer, sheet_name="HoaDon", index=False, startrow=4)
+
+                        wb: Any = writer.book
+                        ws = writer.sheets["HoaDon"]
+
+                        title_fmt = wb.add_format({'bold': True, 'font_size': 14, 'align': 'center', 'font_name': 'Times New Roman'})
+                        head_fmt = wb.add_format({'bold': True, 'border': 1, 'align': 'center', 'bg_color': '#E3F2FD', 'font_name': 'Times New Roman'})
+                        text_fmt = wb.add_format({'border': 1, 'font_name': 'Times New Roman'})
+                        num_fmt = wb.add_format({'border': 1, 'num_format': '#,##0.00', 'font_name': 'Times New Roman'})
+                        total_fmt = wb.add_format({'bold': True, 'border': 1, 'num_format': '#,##0.00', 'bg_color': '#E8F5E9', 'font_name': 'Times New Roman'})
+
+                        ws.merge_range('A1:I1', 'BẢNG TÍNH HÓA ĐƠN', title_fmt)
+                        ws.write('A2', 'Tổng trước VAT', text_fmt)
+                        ws.write('B2', float(rs['sub_total']), num_fmt)
+                        ws.write('D2', 'Tổng VAT', text_fmt)
+                        ws.write('E2', float(rs['vat_total']), num_fmt)
+                        ws.write('G2', 'Tổng thanh toán', text_fmt)
+                        ws.write('H2', float(rs['grand_total']), total_fmt)
+
+                        for c in range(9):
+                            ws.write(4, c, df_x.columns[c], head_fmt)
+
+                        for r in range(len(df_x)):
+                            excel_row = 5 + r
+                            ws.write_number(excel_row, 0, float(df_x.iloc[r, 0]), text_fmt)
+                            ws.write(excel_row, 1, df_x.iloc[r, 1], text_fmt)
+                            ws.write(excel_row, 2, df_x.iloc[r, 2], text_fmt)
+                            ws.write_number(excel_row, 3, float(df_x.iloc[r, 3]), num_fmt)
+                            ws.write_number(excel_row, 4, float(df_x.iloc[r, 4]), num_fmt)
+                            ws.write_number(excel_row, 5, float(df_x.iloc[r, 5]), num_fmt)
+                            ws.write(excel_row, 6, f"{float(df_x.iloc[r, 6]):g}%", text_fmt)
+                            ws.write_number(excel_row, 7, float(df_x.iloc[r, 7]), num_fmt)
+                            ws.write_number(excel_row, 8, float(df_x.iloc[r, 8]), num_fmt)
+
+                        sum_row = 5 + len(df_x)
+                        ws.merge_range(sum_row, 0, sum_row, 4, "TỔNG CỘNG", total_fmt)
+                        ws.write_number(sum_row, 5, float(rs['sub_total']), total_fmt)
+                        ws.write(sum_row, 6, "", total_fmt)
+                        ws.write_number(sum_row, 7, float(rs['vat_total']), total_fmt)
+                        ws.write_number(sum_row, 8, float(rs['grand_total']), total_fmt)
+
+                        ws.set_column('A:A', 6)
+                        ws.set_column('B:B', 42)
+                        ws.set_column('C:C', 12)
+                        ws.set_column('D:I', 16)
+
+                    st.download_button(
+                        "⬇️ Tải file hóa đơn (.xlsx)",
+                        data=buffer_inv.getvalue(),
+                        file_name="HoaDon_TinhNguoc.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
+                except Exception as e:
+                    st.error(f"❌ Lỗi xuất Excel: {str(e)}")
+
         with st.expander("📖 Giải thích công thức tính toán"):
             st.markdown("""
-            ### Công thức tính hóa đơn:
-            
-            #### **Trường hợp KHÔNG có chi phí phát sinh:**
-            
-            **Tính xuôi (từ giá gốc → tổng tiền):**
+            ### Công thức đang dùng (tách VAT theo nhóm)
+
+            **BƯỚC 1: Tính tổng trước VAT**
             ```
-            1. Tiền phí phục vụ = Giá gốc × % Phí phục vụ
-            2. Giá sau phí = Giá gốc + Tiền phí phục vụ
-            3. Tiền VAT = Giá sau phí × % VAT
-            4. Tổng tiền = Giá sau phí + Tiền VAT
+            Tổng trước VAT = Tổng thanh toán / (1 + VAT%)
             ```
-            
-            **Tính ngược (từ tổng tiền → giá gốc):**
+
+            **BƯỚC 2: Tính chi phí phát sinh (mỗi dòng có % phí DV riêng)**
             ```
-            Giá gốc = Tổng tiền ÷ [(1 + % Phí phục vụ) × (1 + % VAT)]
+            Với mỗi dòng phát sinh i:
+              - Thành tiền_i = Đơn giá_i × Số lượng_i
+              - Phí DV_i = Thành tiền_i × Phí DV %_i
+              - Tổng có phí_i = Thành tiền_i + Phí DV_i
+                            - VAT_i = Tổng có phí_i × VAT %_i
+                            - Tổng sau VAT_i = Tổng có phí_i + VAT_i
+            
+            Tổng phát sinh gốc = Σ(Thành tiền_i)
+            Tổng phí DV phát sinh = Σ(Phí DV_i)
+            Tổng phát sinh có phí = Σ(Tổng có phí_i)
+                        Tổng phát sinh sau VAT = Σ(Tổng sau VAT_i)
             ```
-            
-            ---
-            
-            #### **Trường hợp CÓ chi phí phát sinh:**
-            
-            **Lưu ý:** Dịch vụ chính và chi phí phát sinh có thể có tỷ lệ phí phục vụ khác nhau!
-            
-            **Tính xuôi (từ giá gốc → tổng tiền):**
+
+            **BƯỚC 3: Tính dịch vụ chính (có phí DV)**
             ```
-            1. Phí phục vụ chính = Giá dịch vụ chính × % Phí phục vụ chính
-            2. Phí phục vụ phát sinh = Chi phí phát sinh × % Phí phục vụ phát sinh
-            3. Tổng trước VAT = Giá dịch vụ chính + Phí phục vụ chính 
-                              + Chi phí phát sinh + Phí phục vụ phát sinh
-            4. Tiền VAT = Tổng trước VAT × % VAT
-            5. Tổng tiền = Tổng trước VAT + Tiền VAT
+                        Tổng DV chính có phí = (Tổng thanh toán - Tổng phát sinh sau VAT) / (1 + VAT dịch vụ chính%)
+            Tổng DV chính gốc = Tổng DV chính có phí / (1 + Phí DV chính%)
+            Đơn giá DV chính = Tổng DV chính gốc / Số lượng
             ```
-            
-            **Tính ngược (từ tổng tiền → giá gốc):**
+
+            **BƯỚC 4: Tính VAT riêng cho từng nhóm**
             ```
-            1. Tổng trước VAT = Tổng tiền ÷ (1 + % VAT)
-            2. Tiền VAT = Tổng tiền - Tổng trước VAT
+            VAT Nhóm 1 (DV chính) = (DV chính gốc + Phí DV chính) × VAT%
+                        VAT Nhóm 2 (Phát sinh) = Σ(Tổng có phí_i × VAT %_i)
             
-            3. Chi phí phát sinh có phí = Chi phí phát sinh × (1 + % Phí phục vụ phát sinh)
-            4. Giá dịch vụ chính có phí = Tổng trước VAT - Chi phí phát sinh có phí
-            5. Giá dịch vụ chính = Giá dịch vụ chính có phí ÷ (1 + % Phí phục vụ chính)
+            Tổng VAT = VAT Nhóm 1 + VAT Nhóm 2
             ```
-            
-            ---
-            
-            ### Ví dụ cụ thể:
-            
-            **Không có phát sinh:**
-            - Tổng tiền: 1.188.000 VND
-            - Phí phục vụ: 5%
-            - VAT: 10%
-            
-            → Giá gốc = 1.188.000 ÷ (1.05 × 1.10) = 1.029.000 VND (làm tròn)
-            
-            **Có chi phí phát sinh - cùng tỷ lệ phí:**
-            - Tổng tiền: 8.994.000 VND
-            - Chi phí phát sinh: 396.825 VND
-            - Phí phục vụ chính: 5%
-            - Phí phục vụ phát sinh: 5%
-            - VAT: 8%
-            
-            → Tổng trước VAT = 8.994.000 ÷ 1.08 = 8.327.778 VND
-            → Chi phí phát sinh + phí = 396.825 × 1.05 = 416.666 VND
-            → Giá dịch vụ chính + phí = 8.327.778 - 416.666 = 7.911.112 VND
-            → Giá dịch vụ chính = 7.911.112 ÷ 1.05 = 7.534.392 VND
-            
-            **Có chi phí phát sinh - khác tỷ lệ phí:**
-            - Tổng tiền: 8.994.000 VND
-            - Chi phí phát sinh: 396.825 VND
-            - Phí phục vụ chính: 0% (không tính)
-            - Phí phục vụ phát sinh: 5%
-            - VAT: 8%
-            
-            → Tổng trước VAT = 8.994.000 ÷ 1.08 = 8.327.778 VND
-            → Chi phí phát sinh + phí = 396.825 × 1.05 = 416.666 VND
-            → Giá dịch vụ chính (không có phí) = 8.327.778 - 416.666 = 7.911.112 VND
+
+            **💡 Lợi ích:**  
+            - Mỗi dòng phát sinh có thể có % phí phục vụ riêng (linh hoạt)
+            - Mỗi dòng phát sinh có thể có VAT riêng (vd 8%, 10%)
+            - Tách riêng VAT cho dịch vụ chính và chi phí phát sinh  
+            - Dễ đối chiếu với hóa đơn có nhiều nhóm dịch vụ  
+            - Phù hợp với quy định thuế hiện hành
             """)
 
 def render_customer_management():
