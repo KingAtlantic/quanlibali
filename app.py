@@ -1528,7 +1528,7 @@ def create_handover_docx(tour_info, guests, hotels, restaurants, sightseeings, c
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
-    return buffer
+    return buffer.getvalue()
 
 # --- HÀM ĐỌC SỐ TIỀN BẰNG CHỮ (VIETNAMESE) ---
 def read_money_vietnamese(amount):
@@ -1816,7 +1816,7 @@ def create_voucher_pdf(voucher_data):
         
     c.save()
     buffer.seek(0)
-    return buffer
+    return buffer.getvalue()
 
 def create_voucher_docx(voucher_data):
     """Tạo file Word phiếu thu/chi"""
@@ -1926,7 +1926,7 @@ def create_voucher_docx(voucher_data):
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
-    return buffer
+    return buffer.getvalue()
 
 def create_booking_cfm_pdf(booking_info, company_info, lang='en'):
     """Tạo file PDF Booking Confirmation (CFM)"""
@@ -2473,7 +2473,7 @@ def create_booking_cfm_pdf(booking_info, company_info, lang='en'):
 
     c.save()
     buffer.seek(0)
-    return buffer
+    return buffer.getvalue()
 
 def create_booking_cfm_docx(booking_info, company_info, lang='en'):
     """Tạo file Word Booking Confirmation"""
@@ -2615,7 +2615,7 @@ def create_booking_cfm_docx(booking_info, company_info, lang='en'):
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
-    return buffer
+    return buffer.getvalue()
 
 # ==========================================
 # 4. GIAO DIỆN & LOGIC MODULES
